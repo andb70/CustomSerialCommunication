@@ -4,7 +4,7 @@
     <configuration>
         <data xmlns="http://www.netbeans.org/ns/make-project/1">
             <name>CustomSerialCommunicationExample_SendData</name>
-            <creation-uuid>2f137caa-fce4-47c7-8677-af723f7075a4</creation-uuid>
+            <creation-uuid>7029f40d-db71-4cdd-97ac-945a88daa10d</creation-uuid>
             <make-project-type>0</make-project-type>
             <c-extensions>c</c-extensions>
             <cpp-extensions/>
