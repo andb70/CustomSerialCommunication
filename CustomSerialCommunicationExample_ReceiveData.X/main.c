@@ -47,9 +47,14 @@
 #define SYS_FREQ 			(80000000L)
 #define PB_DIV         		8
 #define PRESCALE       		256
-#define TOGGLES_PER_SEC		10
+#define TOGGLES_PER_SEC		1000
 #define T1_TICK       		(SYS_FREQ/PB_DIV/PRESCALE/TOGGLES_PER_SEC)
 //\ timer
+// 3000 ms
+#define SuccessElapsed      3000
+
+// 2000 ms
+#define Timeout             2000
 
 
 #include <xc.h>
@@ -63,17 +68,17 @@
 /*  PORT MAPPING
     RD2     D0      >>>>> CLK
     RD3     D1      >>>>> DATA
- *  RD4     D2
+ *  RD4     D2      (not used)
     RD5 	D3      >>>> output
-    RD6 	D4
-    RD7 	D5
-    RD8 	D6      
+    RD6 	D4      Monitor state receive > set data
+    RD7 	D5      Monitor state receive > wait next clock
+    RD8 	D6      Monitor state check data > 
     RD11	D7
  * 
-    RB13	D8
-    RB14	D9
+    RB13	D8      Monitor CLK
+    RB14	D9      MONITOR DATA
  * 
-    RG9		D10	
+    RG9		D10     Error bit
  * PORTS:
  *      D:  0x09E0
  *      B:	0x6000
@@ -88,14 +93,14 @@
 #define StateRECEIVE_RAISING_EDGE 0x35
 #define StateCHECK_NEXT 0x40
 #define StateCHECK_DATA 0x50
+#define StateSUCCESS 0x60
+#define StateWAIT_RESET 0x70
 
 char timer_event = 0;
 // holds the current execution state
 char programState = StatePOR;
 // holds the current led index
 
-// 20 ms
-#define Timeout 20
 void setErrorBit()
 {
     LATGbits.LATG9 = 1;
@@ -113,11 +118,7 @@ void SetledOFF()
 {
     LATDbits.LATD5 = 0;
 }
-void delay (int t)
-{
-    int n = t*1900; //1900 è un numero ricavato sperimentalmente
-    while(n>0) {n--;}
-}
+
 
 int main(void){
     //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -154,24 +155,24 @@ int main(void){
     
     PORTSetPinsDigitalIn(IOPORT_D, BIT_2); // CLOCK
     PORTSetPinsDigitalIn(IOPORT_D, BIT_3); // DATA
+    
     // bit position counter
     // set = 0 at first clock, it is incremented during reception    
-    char i;    
+    char i;   
+    // data buffer, each bit is set during reception
     char buffer;
+    // serial comunication timeout monitor
     long WaitTime = -1;
-    LATB =0;
-    LATD =0;
-    LATG =0;
+    
+    long SuccessCounter = -1;
+    char SuccessFlag = 0;
     
     while( 1)
     {
-        
+        // monitor the input activity: copy to D8 & D9 
         LATBbits.LATB13 = PORTDbits.RD2;
         LATBbits.LATB14 = PORTDbits.RD3;
-        /*LATDbits.LATD8 = PORTDbits.RD2;
-        LATGbits.LATG9 = PORTDbits.RD3;
-        LATDbits.LATD5 = PORTDbits.RD3;
-        LATDbits.LATD7 = PORTDbits.RD3;*/
+        
         if (timer_event == 1)
         {
             timer_event = 0;
@@ -180,61 +181,79 @@ int main(void){
                 {
                     setErrorBit(); // set error led
                     programState = StateIDLE;
-                    WaitTime = -1;
-                    break;
+                    WaitTime = -2;
                 }
                 WaitTime++;
+            }           
+            if (SuccessCounter > -1){
+                if (SuccessCounter > SuccessElapsed)// transmission broken
+                {
+                    SuccessFlag = 1;
+                    SuccessCounter = -2;
+                }
+                SuccessCounter++;
             }
         }
-        
-        //LATDbits.LATD6      = PORTDbits.RD2;      
-        //LATDbits.LATD5      = PORTDbits.RD3;
-        
-        
         
         switch(programState) 
         {
             case StatePOR  :
                 // Power On Reset
-                programState = StateIDLE;    
+
+                // reset all ports
+                LATB =0;
+                LATD =0;
+                LATG =0;
+                // monitor the errorBit on startup
                 setErrorBit();
+                programState = StateIDLE;    
                 
             case StateIDLE  :                
-                // wait for the first RAISING FRONT on the Clock bit of the Clock PORT
+                // wait for the first RAISING EDGE on the Clock bit of the Clock PORT
                 // remain on this state while RD2 = False
                 if (PORTDbits.RD2 == 0)
-                    break;  
+                    break;                  
+                // exit state condition found                
+                programState = StateINIT_RECEIVE;
+                
+            case StateINIT_RECEIVE  :
+                // initialize session
+                
+                // reset monitor bits
                 resetErrorBit();
                 LATDbits.LATD6 = 0;
                 LATDbits.LATD7 = 0;
                 LATDbits.LATD8 = 0;
-                // exit state condition found
-                programState = StateINIT_RECEIVE;
                 
-            case StateINIT_RECEIVE  :
                 i = 0;
                 buffer = 0;
                 programState = StateRECEIVE;       
                 
             case StateRECEIVE  :
+                // load data into buffer
                 buffer |= PORTDbits.RD3<< i;
+                // increment buffer position for the next loop
                 i++;    
                 programState = StateRECEIVE_RAISING_EDGE;
+                // reset timeout
                 WaitTime = 0;
+                // set Receive monitor
                 LATDbits.LATD6 = 1;
                 
             case StateRECEIVE_RAISING_EDGE :
-                if (i>7)// transmission has ended
+                if (i>7)
                 {
+                    // transmission complete
                     programState = StateCHECK_DATA;
                     break;
                 }
-                // wait for the FALLING FRONT
+                // wait for the FALLING EDGE
                 // remain on this state while RD2 = True
                 if (PORTDbits.RD2 == 1)
                 {               
                     break; 
-                }  
+                }                  
+                // reset Receive monitor
                 LATDbits.LATD6 = 0;
                 programState =StateCHECK_NEXT;
                 
@@ -249,26 +268,38 @@ int main(void){
                 break;
                 
             case StateCHECK_DATA  :
+                // reset Receive monitor
                 LATDbits.LATD6 = 0;
+                // set CHECK_DATA monitor
                 LATDbits.LATD8 = 1;
+                // stop timeout monitor
                 WaitTime = -1;
+                
+                // if trasmission was successful notify with D3 LED
                 if (buffer == 'a'){
-                    LATDbits.LATD5 = 1;
-                    //delay(3000);
-                    //SetledOFF;
+                    SuccessCounter = 0;// start counter
+                    SetLedON();
+                    programState = StateSUCCESS;
+                    break;
                 }
-                else
-                {
-                    LATDbits.LATD6 = 1;
-                    //delay(3000);
-                    //LATDbits.LATD6 = 0;
-                }
-                if (PORTDbits.RD2 == 1)
+                setErrorBit();
+                programState = StateWAIT_RESET;
+                break;
+                
+            case StateSUCCESS  :  
+                if (SuccessFlag==0)
+                    break;
+                
+                SuccessFlag= 0;
+                SetledOFF();
+                programState = StateWAIT_RESET;
+                
+            case StateWAIT_RESET  :
+                 if (PORTDbits.RD2 == 1)
                 {               
                     break; 
-                }  
-                //programState = StateIDLE;      
-                
+                }       
+                programState = StateIDLE;           
         }
         
     }
