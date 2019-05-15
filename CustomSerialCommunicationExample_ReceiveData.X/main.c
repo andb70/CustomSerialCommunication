@@ -73,29 +73,27 @@
     RD6 	D4      Monitor state receive > set data
     RD7 	D5      Monitor state receive > wait next clock
     RD8 	D6      Monitor state check data > 
-    RD11	D7
- * 
+    RD11	D7 
     RB13	D8      Monitor CLK
-    RB14	D9      MONITOR DATA
- * 
-    RG9		D10     Error bit
- * PORTS:
- *      D:  0x09E0
- *      B:	0x6000
- *      G:	0x0200
- *  
+    RB14	D9      MONITOR DATA 
+    RG9		D10     Error bit  
  */
 
 #define StatePOR 0x00
 #define StateIDLE 0x10
 #define StateINIT_RECEIVE 0x20
-#define StateRECEIVE 0x30
-#define StateRECEIVE_RAISING_EDGE 0x35
-#define StateCHECK_NEXT 0x40
+#define StateWRITE_BUFFER 0x30
+//#define StateRECEIVE_RAISING_EDGE 0x35
+#define StateREAD_NEXT 0x40
 #define StateCHECK_DATA 0x50
 #define StateSUCCESS 0x60
-#define StateWAIT_RESET 0x70
+//#define StateWAIT_RESET 0x70
 
+// raising and falling edge function
+#define rTrig(port,btn,old) ((~port) & btn) & (old & btn)
+#define fTrig(port,btn,old) ((port) & btn) & (~old & btn)
+
+// flag set by the timer IRQ
 char timer_event = 0;
 // holds the current execution state
 char programState = StatePOR;
@@ -118,9 +116,8 @@ void SetledOFF()
 {
     LATDbits.LATD5 = 0;
 }
-
-
-int main(void){
+void init()
+{
     //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     //STEP 1. Configure cache, wait states and peripheral bus clock
 	// Configure the device for maximum performance but do not change the PBDIV
@@ -155,23 +152,35 @@ int main(void){
     
     PORTSetPinsDigitalIn(IOPORT_D, BIT_2); // CLOCK
     PORTSetPinsDigitalIn(IOPORT_D, BIT_3); // DATA
+}
+int main(void){
+
+    init();
     
-    // bit position counter
+    // hold the bit position to write in the buffer
     // set = 0 at first clock, it is incremented during reception    
-    char i;   
+    char bitPosition;   
+    
     // data buffer, each bit is set during reception
     char buffer;
     // serial comunication timeout monitor
     long WaitTime = -1;
     
+    // Counter and flag used to light the led on for a defined period
     long SuccessCounter = -1;
     char SuccessFlag = 0;
     
+    char clkRaise;
+    int old_port = 0;
     while( 1)
     {
         // monitor the input activity: copy to D8 & D9 
         LATBbits.LATB13 = PORTDbits.RD2;
         LATBbits.LATB14 = PORTDbits.RD3;
+        
+        // get the raising edge for the clock bit
+        clkRaise = rTrig(PORTD, 0x02, old_port);
+        old_port = PORTD;
         
         if (timer_event == 1)
         {
@@ -211,12 +220,9 @@ int main(void){
             case StateIDLE  :                
                 // wait for the first RAISING EDGE on the Clock bit of the Clock PORT
                 // remain on this state while RD2 = False
-                if (PORTDbits.RD2 == 0)
+                if (clkRaise == 0)
                     break;                  
-                // exit state condition found                
-                programState = StateINIT_RECEIVE;
-                
-            case StateINIT_RECEIVE  :
+                // exit state condition found  
                 // initialize session
                 
                 // reset monitor bits
@@ -225,46 +231,37 @@ int main(void){
                 LATDbits.LATD7 = 0;
                 LATDbits.LATD8 = 0;
                 
-                i = 0;
+                bitPosition = 0;
                 buffer = 0;
-                programState = StateRECEIVE;       
+                programState = StateWRITE_BUFFER;       
                 
-            case StateRECEIVE  :
+            case StateWRITE_BUFFER :
                 // load data into buffer
-                buffer |= PORTDbits.RD3<< i;
+                buffer |= PORTDbits.RD3 << bitPosition;
                 // increment buffer position for the next loop
-                i++;    
-                programState = StateRECEIVE_RAISING_EDGE;
+                bitPosition++;   
                 // reset timeout
                 WaitTime = 0;
                 // set Receive monitor
                 LATDbits.LATD6 = 1;
                 
-            case StateRECEIVE_RAISING_EDGE :
-                if (i>7)
+                // is transmission complete?
+                if (bitPosition>7)
                 {
-                    // transmission complete
                     programState = StateCHECK_DATA;
                     break;
                 }
-                // wait for the FALLING EDGE
-                // remain on this state while RD2 = True
-                if (PORTDbits.RD2 == 1)
-                {               
-                    break; 
-                }                  
+                // transmission is not complete, prepare to receive another bit
                 // reset Receive monitor
                 LATDbits.LATD6 = 0;
-                programState =StateCHECK_NEXT;
+                programState =StateREAD_NEXT;
                 
-            case StateCHECK_NEXT  :
+            case StateREAD_NEXT  :
                 // wait for the RAISING FRONT on the Clock bit of the Clock PORT
                 // remain on this state while condition True
-                if (PORTDbits.RD2 == 0)
-                {               
+                if (clkRaise == 0)
                     break; 
-                }  
-                programState = StateRECEIVE;
+                programState = StateWRITE_BUFFER;
                 break;
                 
             case StateCHECK_DATA  :
@@ -275,15 +272,16 @@ int main(void){
                 // stop timeout monitor
                 WaitTime = -1;
                 
-                // if trasmission was successful notify with D3 LED
+                // IF trasmission was successful notify with D3 LED
                 if (buffer == 'a'){
                     SuccessCounter = 0;// start counter
                     SetLedON();
                     programState = StateSUCCESS;
                     break;
                 }
+                // ELSE set error and reset loop
                 setErrorBit();
-                programState = StateWAIT_RESET;
+                programState = StateIDLE;
                 break;
                 
             case StateSUCCESS  :  
@@ -292,14 +290,7 @@ int main(void){
                 
                 SuccessFlag= 0;
                 SetledOFF();
-                programState = StateWAIT_RESET;
-                
-            case StateWAIT_RESET  :
-                 if (PORTDbits.RD2 == 1)
-                {               
-                    break; 
-                }       
-                programState = StateIDLE;           
+                programState = StateIDLE;     
         }
         
     }
